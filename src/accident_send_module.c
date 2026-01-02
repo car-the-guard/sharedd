@@ -268,35 +268,3 @@ static int fake_spi_send(const uint8_t* buf, uint32_t len)
 static uint8_t get_lane_stub(void) { return 2; }
 static uint16_t get_dist_stub(void) { return 120; }
 static uint8_t get_obj_stub(void) { return 7; }
-
-#ifdef ACCIDENT_SEND_MODULE_STANDALONE_TEST
-int main(void)
-{
-    accinfo_provider_t pv = {
-        .get_lane = get_lane_stub,
-        .get_front_distance_m = get_dist_stub,
-        .get_object_hint = get_obj_stub,
-    };
-
-    accsend_config_t cfg = {
-        .min_send_interval_ms = 200,
-        .default_distance_m = 50,
-        .default_lane = 2,
-        .enable_stdout = 1,
-    };
-
-    ACCSEND_init(&cfg, &pv, fake_spi_send);
-    ACCSEND_start();
-
-    acc_event_t ev = {
-        .severity = 2,
-        .type = ACC_TYPE_COLLISION,
-        .action = 1,
-        .distance_m = 0, // provider 사용
-        .lane = 0,       // provider 사용
-    };
-    ACCSEND_on_event(&ev);
-
-    pause();
-}
-#endif

@@ -15,7 +15,8 @@ SRC = \
     src/can_interface_module.c \
     src/collision_response_module.c \
     src/collision_risk_module.c \
-    src/driving_info_module.c
+    src/driving_info_module.c \
+    src/i2c_interface.c
 
 # ===== Object Files =====
 OBJ = $(SRC:.c=.o)

@@ -1,77 +1,89 @@
+// src/bluetooth_module.c
 #define _GNU_SOURCE
 #include "bluetooth_module.h"
-#include <errno.h>
+#include <pthread.h>
 #include <fcntl.h>
-#include <stdio.h>
 #include <termios.h>
 #include <unistd.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <errno.h>
 #include <ctype.h>
 
-static speed_t baud_to_speed(int baud)
-{
-    switch (baud) {
-    case 9600:   return B9600;
-    case 19200:  return B19200;
-    case 38400:  return B38400;
-    case 57600:  return B57600;
-    case 115200: return B115200;
-    default:     return B9600;   // fallback
+// [PART 1] 저수준 구현
+static speed_t baud_to_speed(int baud) {
+    switch(baud) {
+        case 9600: return B9600; case 115200: return B115200; default: return B9600;
     }
 }
-
-int bt_open(const char *dev, int baud)
-{
+static int internal_bt_open(const char *dev, int baud) {
     int fd = open(dev, O_RDONLY | O_NOCTTY);
-    if (fd < 0) { perror("bt_open: open"); return -1; }
-
-    struct termios tio;
-    if (tcgetattr(fd, &tio) < 0) { perror("bt_open: tcgetattr"); close(fd); return -1; }
-
-    cfmakeraw(&tio);
-    speed_t sp = baud_to_speed(baud);
-    cfsetispeed(&tio, sp);
-    cfsetospeed(&tio, sp);
-
-    tio.c_cflag |= (CLOCAL | CREAD);
-    tio.c_cflag &= ~CRTSCTS;
-    tio.c_iflag &= ~(IXON | IXOFF | IXANY);
-
-    // block until 1 byte
-    tio.c_cc[VMIN]  = 1;
-    tio.c_cc[VTIME] = 0;
-
-    if (tcsetattr(fd, TCSANOW, &tio) < 0) { perror("bt_open: tcsetattr"); close(fd); return -1; }
-
+    if(fd < 0) return -1;
+    struct termios t;
+    if(tcgetattr(fd, &t) < 0) { close(fd); return -1; }
+    cfmakeraw(&t);
+    cfsetospeed(&t, baud_to_speed(baud));
+    cfsetispeed(&t, baud_to_speed(baud));
+    t.c_cc[VMIN]=1; t.c_cc[VTIME]=0;
+    if(tcsetattr(fd, TCSANOW, &t) < 0) { close(fd); return -1; }
     return fd;
 }
-
-void bt_close(int fd)
-{
-    if (fd >= 0) close(fd);
+static void internal_bt_close(int fd) { if(fd>=0) close(fd); }
+static bt_cmd_t internal_bt_read(int fd) {
+    unsigned char ch;
+    if(read(fd, &ch, 1) <= 0) return BT_CMD_NONE;
+    switch(tolower(ch)) {
+        case 'd': return BT_CMD_D;
+        case 's': return BT_CMD_S;
+        case 'l': return BT_CMD_L;
+        case 'r': return BT_CMD_R;
+    }
+    return BT_CMD_NONE;
 }
 
-bt_cmd_t bt_read_cmd_blocking(int fd, uint8_t *raw_out)
-{
-    for (;;) {
-        unsigned char ch;
-        ssize_t r = read(fd, &ch, 1);
+// [PART 2] 모듈 구현
+static bt_config_t g_cfg;
+static bt_on_cmd_fn g_cb = NULL;
+static pthread_t g_thr;
+static int g_running = 0;
+static int g_fd = -1;
 
-        if (r < 0) {
-            if (errno == EINTR) continue;
-            perror("bt_read_cmd_blocking: read");
-            return BT_CMD_NONE; // caller can decide to exit
-        }
-        if (r == 0) continue;
+static void* bt_rx_thread(void* arg) {
+    (void)arg;
+    g_fd = internal_bt_open(g_cfg.uart_dev, g_cfg.baud);
+    if(g_fd < 0) { fprintf(stderr, "[BT] Open failed\n"); return NULL; }
+    printf("[BT] Started on %s\n", g_cfg.uart_dev);
 
-        if (raw_out) *raw_out = ch;
-
-        ch = (unsigned char)tolower(ch);
-
-        if (ch == 'd') return BT_CMD_D;
-        if (ch == 's') return BT_CMD_S;
-        if (ch == 'l') return BT_CMD_L;
-        if (ch == 'r') return BT_CMD_R;
-
-        // ignore junk: \r \n spaces etc
+    while(g_running) {
+        bt_cmd_t cmd = internal_bt_read(g_fd);
+        if(cmd != BT_CMD_NONE && g_cb) g_cb(cmd);
+        if(cmd == BT_CMD_NONE) usleep(10000); // Wait if no data
     }
+    internal_bt_close(g_fd);
+    return NULL;
+}
+
+int BT_init(const bt_config_t* cfg, bt_on_cmd_fn cb) {
+    if(!cfg) return -1;
+    g_cfg = *cfg; g_cb = cb;
+    return 0;
+}
+int BT_start(void) {
+    if(g_running) return 0;
+    g_running = 1;
+    return pthread_create(&g_thr, NULL, bt_rx_thread, NULL) == 0 ? 0 : -1;
+}
+void BT_stop(void) {
+    if (!g_running) return;
+    g_running = 0;
+
+    // [핵심] I2C 때와 마찬가지로, 파일을 먼저 닫아서 read()를 깨워야 합니다.
+    // internal_bt_close()나 bt_close()가 fd를 닫는지 확인하세요.
+    if (g_fd >= 0) {
+        close(g_fd); // <-- 여기서 강제로 닫아야 스레드가 깨어납니다!
+        g_fd = -1;
+    }
+
+    pthread_join(g_thr, NULL);
 }
